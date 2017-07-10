@@ -31,7 +31,7 @@ def build_stan_models(target_dir, models_dir=MODELS_DIR):
         target_name = '{}_growth.pkl'.format(model_type)
         with open(os.path.join(models_dir, model_name)) as f:
             model_code = f.read()
-        sm = StanModel(model_code=model_code)
+        sm = StanModel(model_name='prophet_{}_growth'.format(model_name), model_code=model_code, extra_compile_args = [])
         with open(os.path.join(target_dir, target_name), 'wb') as f:
             pickle.dump(sm, f, protocol=pickle.HIGHEST_PROTOCOL)
 
