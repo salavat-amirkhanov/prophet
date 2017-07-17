@@ -10,16 +10,13 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-import os
-
 import numpy as np
 import pandas as pd
 
 # fb-block 1 start
+import os
 from unittest import TestCase
 from fbprophet import Prophet
-# fb-block 1 end
-# fb-block 2
 
 DATA = pd.read_csv(
     os.path.join(os.path.dirname(__file__), 'data.csv'),
@@ -29,6 +26,9 @@ DATA2 = pd.read_csv(
     os.path.join(os.path.dirname(__file__), 'data2.csv'),
     parse_dates=['ds'],
 )
+# fb-block 1 end
+# fb-block 2
+
 
 class TestProphet(TestCase):
 
@@ -307,7 +307,7 @@ class TestProphet(TestCase):
     def test_auto_daily_seasonality(self):
         # Should be enabled
         m = Prophet()
-        self.assertEqual(m.yearly_seasonality, 'auto')
+        self.assertEqual(m.daily_seasonality, 'auto')
         m.fit(DATA2)
         self.assertIn('daily', m.seasonalities)
         self.assertEqual(m.seasonalities['daily'], (1, 4))

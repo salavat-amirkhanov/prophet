@@ -28,7 +28,7 @@ from fbprophet.models import prophet_stan_models
 # fb-block 1 end
 
 try:
-    import pystan
+    import pystan  # noqa F401
 except ImportError:
     logger.error('You cannot run prophet without pystan installed')
     raise
@@ -165,7 +165,7 @@ class Prophet(object):
     def setup_dataframe(self, df, initialize_scales=False):
         """Prepare dataframe for fitting or predicting.
 
-        Adds a time index and scales y. Creates auxillary columns 't', 't_ix',
+        Adds a time index and scales y. Creates auxiliary columns 't', 't_ix',
         'y_scaled', and 'cap_scaled'. These columns are used during both
         fitting and predicting.
 
@@ -180,6 +180,8 @@ class Prophet(object):
         """
         if 'y' in df:
             df['y'] = pd.to_numeric(df['y'])
+            if np.isinf(df['y'].values).any():
+                raise ValueError('Found infinity in column y.')
         df['ds'] = pd.to_datetime(df['ds'])
         if df['ds'].isnull().any():
             raise ValueError('Found NaN in column ds.')
@@ -221,7 +223,7 @@ class Prophet(object):
                 if too_low or too_high:
                     raise ValueError('Changepoints must fall within training data.')
         elif self.n_changepoints > 0:
-            # Place potential changepoints evenly throuh first 80% of history
+            # Place potential changepoints evenly through first 80% of history
             max_ix = np.floor(self.history.shape[0] * 0.8)
             cp_indexes = (
                 np.linspace(0, max_ix, self.n_changepoints + 1)
@@ -312,7 +314,7 @@ class Prophet(object):
         expanded_holidays = defaultdict(lambda: np.zeros(dates.shape[0]))
         # Makes an index so we can perform `get_loc` below.
         # Strip to just dates.
-        row_index = pd.DatetimeIndex(dates.apply(lambda x:x.date()))
+        row_index = pd.DatetimeIndex(dates.apply(lambda x: x.date()))
 
         for _ix, row in self.holidays.iterrows():
             dt = row.ds.date()
@@ -391,7 +393,7 @@ class Prophet(object):
 
     def parse_seasonality_args(self, name, arg, auto_disable, default_order):
         """Get number of fourier components for built-in seasonalities.
-        
+
         Parameters
         ----------
         name: string name of the seasonality component.
@@ -449,7 +451,7 @@ class Prophet(object):
 
         # Weekly seasonality
         weekly_disable = ((last - first < pd.Timedelta(weeks=2)) or
-            (min_dt >= pd.Timedelta(weeks=1)))
+                          (min_dt >= pd.Timedelta(weeks=1)))
         fourier_order = self.parse_seasonality_args(
             'weekly', self.weekly_seasonality, weekly_disable, 3)
         if fourier_order > 0:
@@ -457,7 +459,7 @@ class Prophet(object):
 
         # Daily seasonality
         daily_disable = ((last - first < pd.Timedelta(days=2)) or
-            (min_dt >= pd.Timedelta(days=1)))
+                         (min_dt >= pd.Timedelta(days=1)))
         fourier_order = self.parse_seasonality_args(
             'daily', self.daily_seasonality, daily_disable, 4)
         if fourier_order > 0:
@@ -554,8 +556,6 @@ class Prophet(object):
             raise Exception('Prophet object can only be fit once. '
                             'Instantiate a new object.')
         history = df[df['y'].notnull()].copy()
-        if np.isinf(history['y'].values).any():
-            raise ValueError('Found infinity in column y.')
         self.history_dates = pd.to_datetime(df['ds']).sort_values()
 
         history = self.setup_dataframe(history, initialize_scales=True)
@@ -1056,7 +1056,7 @@ class Prophet(object):
                     ax=ax, uncertainty=uncertainty, yearly_start=yearly_start)
             else:
                 self.plot_seasonality(
-                     name=plot, ax=ax, uncertainty=uncertainty)
+                    name=plot, ax=ax, uncertainty=uncertainty)
 
         fig.tight_layout()
         return fig

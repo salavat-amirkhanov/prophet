@@ -33,6 +33,8 @@ globalVariables(c(
 #'  FALSE, or a number of Fourier terms to generate.
 #' @param weekly.seasonality Fit weekly seasonality. Can be 'auto', TRUE,
 #'  FALSE, or a number of Fourier terms to generate.
+#' @param daily.seasonality Fit daily seasonality. Can be 'auto', TRUE,
+#' FALSE, or a number of Fourier terms to generate.
 #' @param holidays data frame with columns holiday (character) and ds (date
 #'  type)and optionally columns lower_window and upper_window which specify a
 #'  range of days around the date to be included as holidays. lower_window=-2
@@ -76,6 +78,7 @@ prophet <- function(df = NULL,
                     n.changepoints = 25,
                     yearly.seasonality = 'auto',
                     weekly.seasonality = 'auto',
+                    daily.seasonality = 'auto',
                     holidays = NULL,
                     seasonality.prior.scale = 10,
                     holidays.prior.scale = 10,
@@ -98,6 +101,7 @@ prophet <- function(df = NULL,
     n.changepoints = n.changepoints,
     yearly.seasonality = yearly.seasonality,
     weekly.seasonality = weekly.seasonality,
+    daily.seasonality = daily.seasonality,
     holidays = holidays,
     seasonality.prior.scale = seasonality.prior.scale,
     changepoint.prior.scale = changepoint.prior.scale,
@@ -158,7 +162,8 @@ validate_inputs <- function(m) {
       if (grepl("_delim_", h)) {
         stop('Holiday name cannot contain "_delim_"')
       }
-      if (h %in% c('zeros', 'yearly', 'weekly', 'yhat', 'seasonal', 'trend')) {
+      if (h %in% c('zeros', 'yearly', 'weekly', 'daily', 'yhat', 'seasonal',
+                   'trend')) {
         stop(paste0('Holiday name "', h, '" reserved.'))
       }
     }
@@ -206,6 +211,46 @@ compile_stan_model <- function(model) {
   return(rstan::stan_model(stanc_ret = stanc, model_name = model.name))
 }
 
+#' Convert date vector
+#' 
+#' Convert the date to POSIXct object 
+#' 
+#' @param ds Date vector, can be consisted of characters
+#' @param tz string time zone
+#' 
+#' @return vector of POSIXct object converted from date
+#' 
+set_date <- function(ds = NULL, tz = "GMT") {
+  if (length(ds) == 0) {
+    return(NULL)
+  } 
+  
+  if (is.factor(ds)) {
+    ds <- as.character(ds)
+  }
+  
+  if (min(nchar(ds)) < 12) {
+    ds <- as.POSIXct(ds, format = "%Y-%m-%d", tz = tz)
+  } else {
+    ds <- as.POSIXct(ds, format = "%Y-%m-%d %H:%M:%S", tz = tz)
+  }
+  return(ds)
+}
+
+#' Time difference between datetimes
+#' 
+#' Compute time difference of two POSIXct objects
+#' 
+#' @param ds1 POSIXct object
+#' @param ds2 POSIXct object
+#' @param units string units of difference, e.g. 'days' or 'secs'.
+#' 
+#' @return numeric time difference
+#' 
+time_diff <- function(ds1, ds2, units = "days") {
+  return(as.numeric(difftime(ds1, ds2, units = units)))
+}
+
 #' Prepare dataframe for fitting or predicting.
 #'
 #' Adds a time index and scales y. Creates auxillary columns 't', 't_ix',
@@ -222,9 +267,10 @@ setup_dataframe <- function(m, df, initialize_scales = FALSE) {
   if (exists('y', where=df)) {
     df$y <- as.numeric(df$y)
   }
-  df$ds <- zoo::as.Date(df$ds)
+  df$ds <- set_date(df$ds)
   if (anyNA(df$ds)) {
-    stop('Unable to parse date format in column ds. Convert to date format.')
+    stop(paste('Unable to parse date format in column ds. Convert to date ',
+               'format. Either %Y-%m-%d or %Y-%m-%d %H:%M:%S'))
   }
 
   df <- df %>%
@@ -233,10 +279,10 @@ setup_dataframe <- function(m, df, initialize_scales = FALSE) {
   if (initialize_scales) {
     m$y.scale <- max(abs(df$y))
     m$start <- min(df$ds)
-    m$t.scale <- as.numeric(max(df$ds) - m$start)
+    m$t.scale <- time_diff(max(df$ds), m$start, "secs")
   }
 
-  df$t <- as.numeric(df$ds - m$start) / m$t.scale
+  df$t <- time_diff(df$ds, m$start, "secs") / m$t.scale
   if (exists('y', where=df)) {
     df$y_scaled <- df$y / m$y.scale
   }
@@ -267,6 +313,7 @@ setup_dataframe <- function(m, df, initialize_scales = FALSE) {
 set_changepoints <- function(m) {
   if (!is.null(m$changepoints)) {
     if (length(m$changepoints) > 0) {
+      m$changepoints <- set_date(m$changepoints)
       if (min(m$changepoints) < min(m$history$ds)
           || max(m$changepoints) > max(m$history$ds)) {
         stop('Changepoints must fall within training data.')
@@ -285,8 +332,8 @@ set_changepoints <- function(m) {
     }
   }
   if (length(m$changepoints) > 0) {
-    m$changepoints <- zoo::as.Date(m$changepoints)
-    m$changepoints.t <- sort(as.numeric(m$changepoints - m$start) / m$t.scale)
+    m$changepoints.t <- sort(
+      time_diff(m$changepoints, m$start, "secs")) / m$t.scale
   } else {
     m$changepoints.t <- c(0)  # dummy changepoint
   }
@@ -316,7 +363,7 @@ get_changepoint_matrix <- function(m) {
 #' @return Matrix with seasonality features.
 #'
 fourier_series <- function(dates, period, series.order) {
-  t <- dates - zoo::as.Date('1970-01-01')
+  t <- time_diff(dates, set_date('1970-01-01 00:00:00'))
   features <- matrix(0, length(t), 2 * series.order)
   for (i in 1:series.order) {
     x <- as.numeric(2 * i * pi * t / period)
@@ -351,8 +398,11 @@ make_seasonality_features <- function(dates, period, series.order, prefix) {
 #' @importFrom dplyr "%>%"
 make_holiday_features <- function(m, dates) {
   scale.ratio <- m$holidays.prior.scale / m$seasonality.prior.scale
+  # Strip dates to be just days, for joining on holidays
+  dates <- set_date(format(dates, "%Y-%m-%d"))
+
   wide <- m$holidays %>%
-    dplyr::mutate(ds = zoo::as.Date(ds)) %>%
+    dplyr::mutate(ds = set_date(ds)) %>%
     dplyr::group_by(holiday, ds) %>%
     dplyr::filter(row_number() == 1) %>%
     dplyr::do({
@@ -364,7 +414,7 @@ make_holiday_features <- function(m, dates) {
       }
       names <- paste(
         .$holiday, '_delim_', ifelse(offsets < 0, '-', '+'), abs(offsets), sep = '')
-      dplyr::data_frame(ds = .$ds + offsets, holiday = names)
+      dplyr::data_frame(ds = .$ds + offsets * 24 * 3600, holiday = names)
     }) %>%
     dplyr::mutate(x = scale.ratio) %>%
     tidyr::spread(holiday, x, fill = 0)
@@ -464,6 +514,8 @@ parse_seasonality_args <- function(m, name, arg, auto.disable, default.order) {
 #' Turns on yearly seasonality if there is >=2 years of history.
 #' Turns on weekly seasonality if there is >=2 weeks of history, and the
 #' spacing between dates in the history is <7 days.
+#' Turns on daily seasonality if there is >=2 days of history, and the spacing
+#' between dates in the history is <1 day.
 #'
 #' @param m Prophet object.
 #'
@@ -472,21 +524,28 @@ parse_seasonality_args <- function(m, name, arg, auto.disable, default.order) {
 set_auto_seasonalities <- function(m) {
   first <- min(m$history$ds)
   last <- max(m$history$ds)
-  dt <- diff(m$history$ds)
+  dt <- diff(time_diff(m$history$ds, m$start))
   min.dt <- min(dt[dt > 0])
 
-  yearly.disable <- last - first < 730
+  yearly.disable <- time_diff(last, first) < 730
   fourier.order <- parse_seasonality_args(
     m, 'yearly', m$yearly.seasonality, yearly.disable, 10)
   if (fourier.order > 0) {
     m$seasonalities[['yearly']] <- c(365.25, fourier.order)
   }
 
-  weekly.disable <- ((last - first < 14) || (min.dt >= 7))
+  weekly.disable <- ((time_diff(last, first) < 14) || (min.dt >= 7))
   fourier.order <- parse_seasonality_args(
     m, 'weekly', m$weekly.seasonality, weekly.disable, 3)
   if (fourier.order > 0) {
     m$seasonalities[['weekly']] <- c(7, fourier.order)
+  }
+
+  daily.disable <- ((time_diff(last, first) < 2) || (min.dt >= 1))
+  fourier.order <- parse_seasonality_args(
+    m, 'daily', m$daily.seasonality, daily.disable, 4)
+  if (fourier.order > 0) {
+    m$seasonalities[['daily']] <- c(1, fourier.order)
   }
   return(m)
 }
@@ -571,7 +630,7 @@ fit.prophet <- function(m, df, ...) {
   if (any(is.infinite(history$y))) {
     stop("Found infinity in column y.")
   }
-  m$history.dates <- sort(zoo::as.Date(df$ds))
+  m$history.dates <- sort(set_date(df$ds))
 
   out <- setup_dataframe(m, history, initialize_scales = TRUE)
   history <- out$df
@@ -985,7 +1044,7 @@ sample_predictive_trend <- function(model, df, iteration) {
 #'
 #' @param m Prophet model object.
 #' @param periods Int number of periods to forecast forward.
-#' @param freq 'day', 'week', 'month', 'quarter', or 'year'.
+#' @param freq 'day', 'week', 'month', 'quarter', 'year', 1(1 sec), 60(1 minute) or 3600(1 hour).
 #' @param include_history Boolean to include the historical dates in the data
 #'  frame for predictions.
 #'
@@ -993,12 +1052,17 @@ sample_predictive_trend <- function(model, df, iteration) {
 #'  requested number of periods.
 #'
 #' @export
-make_future_dataframe <- function(m, periods, freq = 'd',
+make_future_dataframe <- function(m, periods, freq = 'day',
                                   include_history = TRUE) {
+  # For backwards compatability with previous zoo date type,
+  if (freq == 'm') {
+    freq <- 'month'
+  }
   dates <- seq(max(m$history.dates), length.out = periods + 1, by = freq)
   dates <- dates[2:(periods + 1)]  # Drop the first, which is max(history$ds)
   if (include_history) {
     dates <- c(m$history.dates, dates)
+    attr(dates, "tzone") <- "GMT"
   }
   return(data.frame(ds = dates))
 }
@@ -1109,7 +1173,8 @@ prophet_plot_components <- function(
   }
   # Plot other seasonalities
   for (name in names(m$seasonalities)) {
-    if (!(name %in% c('weekly', 'yearly')) && (name %in% colnames(df))) {
+    if (!(name %in% c('weekly', 'yearly')) &&
+        (name %in% colnames(df))) {
       panels[[length(panels) + 1]] <- plot_seasonality(m, name, uncertainty)
     }
   }
@@ -1196,7 +1261,7 @@ plot_holidays <- function(m, df, uncertainty = TRUE) {
 plot_weekly <- function(m, uncertainty = TRUE, weekly_start = 0) {
   # Compute weekly seasonality for a Sun-Sat sequence of dates.
   df.w <- data.frame(
-    ds=seq.Date(zoo::as.Date('2017-01-01'), by='d', length.out=7) +
+    ds=seq(set_date('2017-01-01'), by='d', length.out=7) +
     weekly_start, cap=1.)
   df.w <- setup_dataframe(m, df.w)$df
   seas <- predict_seasonal_components(m, df.w)
@@ -1229,7 +1294,7 @@ plot_weekly <- function(m, uncertainty = TRUE, weekly_start = 0) {
 plot_yearly <- function(m, uncertainty = TRUE, yearly_start = 0) {
   # Compute yearly seasonality for a Jan 1 - Dec 31 sequence of dates.
   df.y <- data.frame(
-    ds=seq.Date(zoo::as.Date('2017-01-01'), by='d', length.out=365) +
+    ds=seq(set_date('2017-01-01'), by='d', length.out=365) +
     yearly_start, cap=1.)
   df.y <- setup_dataframe(m, df.y)$df
   seas <- predict_seasonal_components(m, df.y)
@@ -1238,8 +1303,8 @@ plot_yearly <- function(m, uncertainty = TRUE, yearly_start = 0) {
   gg.yearly <- ggplot2::ggplot(seas, ggplot2::aes(x = ds, y = yearly,
                                                   group = 1)) +
     ggplot2::geom_line(color = "#0072B2", na.rm = TRUE) +
-    ggplot2::scale_x_date(labels = scales::date_format('%B %d')) +
-    ggplot2::labs(x = "Day of year")
+    ggplot2::labs(x = "Day of year") +
+    ggplot2::scale_x_datetime(labels = scales::date_format('%B %d'))
   if (uncertainty) {
     gg.yearly <- gg.yearly +
     ggplot2::geom_ribbon(ggplot2::aes(ymin = yearly_lower,
@@ -1260,24 +1325,28 @@ plot_yearly <- function(m, uncertainty = TRUE, yearly_start = 0) {
 #' @return A ggplot2 plot.
 plot_seasonality <- function(m, name, uncertainty = TRUE) {
   # Compute seasonality from Jan 1 through a single period.
-  start <- zoo::as.Date('2017-01-01')
+  start <- set_date('2017-01-01')
   period <- m$seasonalities[[name]][1]
-  end <- start + period
-  plot.points <- as.numeric(end - start)
+  end <- start + period * 24 * 3600
+  plot.points <- 200
   df.y <- data.frame(
-    ds=seq.Date(from=start, to=end, length.out=plot.points), cap=1.)
+    ds=seq(from=start, to=end, length.out=plot.points), cap=1.)
   df.y <- setup_dataframe(m, df.y)$df
   seas <- predict_seasonal_components(m, df.y)
   seas$ds <- df.y$ds
   gg.s <- ggplot2::ggplot(
       seas, ggplot2::aes_string(x = 'ds', y = name, group = 1)) +
     ggplot2::geom_line(color = "#0072B2", na.rm = TRUE)
-  if (period < 14) {
+  if (period <= 2) {
+    fmt.str <- '%T'
+  }
+  else if (period < 14) {
     fmt.str <- '%m/%d %R'
   } else {
     fmt.str <- '%m/%d'
   }
-  gg.s <- gg.s + ggplot2::scale_x_date(labels = scales::date_format(fmt.str))
+  gg.s <- gg.s +
+    ggplot2::scale_x_datetime(labels = scales::date_format(fmt.str))
   if (uncertainty) {
     gg.s <- gg.s +
     ggplot2::geom_ribbon(
