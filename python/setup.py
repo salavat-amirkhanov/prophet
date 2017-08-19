@@ -111,7 +111,6 @@ setup(
     setup_requires=[
     ],
     install_requires=[
-        'matplotlib',
         'pandas>=0.18.1',
         'pystan>=2.16.1',
     ],
